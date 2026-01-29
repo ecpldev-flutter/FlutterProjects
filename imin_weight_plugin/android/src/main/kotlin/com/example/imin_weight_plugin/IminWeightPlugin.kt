@@ -8,17 +8,21 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import com.imin.scalelibrary.ScaleManager
 import com.imin.scalelibrary.ScaleResult
-import java.util.Timer
-import java.util.TimerTask
 
 class IminWeightPlugin : FlutterPlugin {
 
     private lateinit var context: Context
-    private lateinit var scaleManager: ScaleManager
-    private var eventSink: EventChannel.EventSink? = null
-    private var timer: Timer? = null
+    private var scaleManager: ScaleManager? = null
 
-    //  1. Called when plugin is attached
+    private var eventSink: EventChannel.EventSink? = null
+    private var isServiceConnected = false
+    private var isReading = false
+
+    private val handler = Handler(Looper.getMainLooper())
+
+    // --------------------------------------------------
+    // Plugin attached
+    // --------------------------------------------------
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
 
@@ -27,86 +31,108 @@ class IminWeightPlugin : FlutterPlugin {
 
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                     eventSink = events
+                    Log.d("IMIN_SCALE", "Flutter started listening")
                     connectScale()
                 }
 
                 override fun onCancel(arguments: Any?) {
-                    stopReading()
+                    Log.d("IMIN_SCALE", "Flutter stopped listening")
+                    stopAndDisconnect()
                 }
             })
     }
 
-    //  2. Connect scale service
+    // --------------------------------------------------
+    // Connect scale service
+    // --------------------------------------------------
     private fun connectScale() {
         scaleManager = ScaleManager.getInstance(context)
 
-        scaleManager.connectService(object :
+        scaleManager?.connectService(object :
             ScaleManager.ScaleServiceConnection {
 
             override fun onServiceConnected() {
                 Log.d("IMIN_SCALE", "Scale service connected")
+                isServiceConnected = true
                 startReading()
             }
 
             override fun onServiceDisconnect() {
                 Log.d("IMIN_SCALE", "Scale service disconnected")
+                isServiceConnected = false
+                isReading = false
             }
         })
     }
 
-    //  3. Read weight periodically
+    // --------------------------------------------------
+    // Start reading weight
+    // --------------------------------------------------
     private fun startReading() {
-        timer = Timer()
-        timer?.scheduleAtFixedRate(object : TimerTask() {
-            override fun run() {
+        if (!isServiceConnected || isReading) return
+        isReading = true
 
-                scaleManager.getData(object : ScaleResult() {
+        scaleManager?.getData(object : ScaleResult() {
 
-                    override fun getResult(net: Int, tare: Int, isStable: Boolean) {
-                        if (isStable) {
-                            Handler(Looper.getMainLooper()).post {
-                                eventSink?.success(net)
-                            }
-                        }
-                    }
-
-                    override fun getStatus(
-                        isLightWeight: Boolean,
-                        overload: Boolean,
-                        clearZeroErr: Boolean,
-                        calibrationErr: Boolean
-                    ) {}
-
-                    override fun getPrice(
-                        net: Int,
-                        tare: Int,
-                        unit: Int,
-                        unitPrice: String,
-                        totalPrice: String,
-                        isStable: Boolean,
-                        isLightWeight: Boolean
-                    ) {}
-
-                    override fun error(errorCode: Int) {
-                        Log.e("IMIN_SCALE", "error=$errorCode")
-                    }
-                })
+            override fun getResult(
+                net: Int,
+                tare: Int,
+                isStable: Boolean
+            ) {
+                handler.post {
+                    eventSink?.success(net)
+                }
             }
-        }, 0, 400)
+
+            override fun getStatus(
+                isLightWeight: Boolean,
+                overload: Boolean,
+                clearZeroErr: Boolean,
+                calibrationErr: Boolean
+            ) {}
+
+            override fun getPrice(
+                net: Int,
+                tare: Int,
+                unit: Int,
+                unitPrice: String,
+                totalPrice: String,
+                isStable: Boolean,
+                isLightWeight: Boolean
+            ) {}
+
+            override fun error(errorCode: Int) {
+                Log.e("IMIN_SCALE", "SDK error: $errorCode")
+            }
+        })
     }
 
-    //  4. Stop reading
-    private fun stopReading() {
-        timer?.cancel()
-        timer = null
-        if (::scaleManager.isInitialized) {
-            scaleManager.cancelGetData()
+    // --------------------------------------------------
+    // STOP AND FULLY DISCONNECT (CRITICAL)
+    // --------------------------------------------------
+    private fun stopAndDisconnect() {
+        try {
+            scaleManager?.cancelGetData()
+        } catch (e: Exception) {
+            Log.w("IMIN_SCALE", "cancelGetData error: ${e.message}")
         }
+
+        try {
+            scaleManager?.disconnectService()
+        } catch (e: Exception) {
+            Log.w("IMIN_SCALE", "disconnectService error: ${e.message}")
+        }
+
+        scaleManager = null
         eventSink = null
+        isReading = false
+        isServiceConnected = false
     }
 
-    //  5. Plugin detached (MUST be at class level)
+    // --------------------------------------------------
+    // Plugin detached
+    // --------------------------------------------------
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        stopReading()
+        stopAndDisconnect()
     }
 }
